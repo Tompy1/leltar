@@ -89,7 +89,7 @@
       pick.addEventListener("click", () => toggleSelect(img.id));
 
       const cap = document.createElement("figcaption");
-      cap.textContent = img.prompt;
+      cap.textContent = img.label || img.prompt;
       cap.title = img.prompt;
 
       const actions = document.createElement("div");
@@ -180,7 +180,8 @@
       video.controls = true;
       video.preload = "metadata";
       const cap = document.createElement("figcaption");
-      cap.textContent = `${v.created} · ${v.image_count} kép`;
+      cap.textContent = `${v.title} · ${v.created}`;
+      cap.title = v.title;
       const actions = document.createElement("div");
       actions.className = "actions";
       const dl = document.createElement("a");
@@ -206,6 +207,129 @@
     }
   }
 
+  // ---------- Videó szövegből: fülek ----------
+  const tabs = document.querySelectorAll("#text-video .tab");
+  tabs.forEach((tab) => tab.addEventListener("click", () => {
+    tabs.forEach((t) => t.setAttribute("aria-selected", t === tab));
+    document.querySelectorAll("#text-video [data-panel]").forEach((p) => {
+      p.hidden = p.dataset.panel !== tab.dataset.tab;
+    });
+    setMsg($("text-video-msg"), "");
+  }));
+
+  function countScenes() {
+    const n = $("story-scenes").value.split("\n").filter((l) => l.split("|")[0].trim()).length;
+    $("story-count").textContent = n ? `${n} jelenet = ${n} kép generálása` : "";
+    return n;
+  }
+  $("story-scenes").addEventListener("input", countScenes);
+
+  // ---------- Háttérfeladat követése ----------
+  let polling = null;
+
+  function setBusy(busy) {
+    for (const id of ["story-btn", "sora-btn"]) if ($(id)) $(id).disabled = busy;
+    $("job-box").hidden = !busy;
+  }
+
+  function watchJob(jobId) {
+    setBusy(true);
+    setMsg($("text-video-msg"), "");
+    clearInterval(polling);
+    const tick = async () => {
+      try {
+        const resp = await fetch(`/api/jobs/${jobId}`, { headers: { "X-Requested-With": "fetch" } });
+        if (resp.status === 401) { location.href = "/login"; return; }
+        if (!resp.ok) return; // átmeneti hiba: próbáljuk újra
+        const job = await resp.json();
+        $("job-progress").value = job.progress;
+        setMsg($("job-msg"), job.message);
+        if (job.status === "running") return;
+        clearInterval(polling);
+        setBusy(false);
+        if (job.status === "done" && job.video) {
+          state.videos.unshift(job.video);
+          renderVideos();
+          setMsg($("text-video-msg"), "Kész! A videót lent, a „Videóim” között találod.");
+          reloadImagesSoon();
+        } else {
+          setMsg($("text-video-msg"), job.message || "Hiba történt.", true);
+          reloadImagesSoon();
+        }
+      } catch { /* hálózati hiba: következő körben újra */ }
+    };
+    tick();
+    polling = setInterval(tick, 3000);
+  }
+
+  // A mese képei a galériába is bekerülnek – a pontos listát a szerver adja.
+  function reloadImagesSoon() {
+    fetch("/", { headers: { "X-Requested-With": "fetch" } })
+      .then((r) => r.text())
+      .then((html) => {
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const fresh = JSON.parse(doc.getElementById("initial-data").textContent);
+        state.images = fresh.images;
+        renderGallery();
+        const rem = doc.getElementById("remaining");
+        if (rem) $("remaining").textContent = rem.textContent;
+      })
+      .catch(() => {});
+  }
+
+  $("story-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const n = countScenes();
+    if (!n) {
+      setMsg($("text-video-msg"), "Írj legalább egy jelenetet.", true);
+      return;
+    }
+    if (n > state.maxStoryScenes) {
+      setMsg($("text-video-msg"), `Legfeljebb ${state.maxStoryScenes} jelenet lehet.`, true);
+      return;
+    }
+    const form = new FormData();
+    form.append("title", $("story-title").value);
+    form.append("style", $("story-style").value);
+    form.append("scenes", $("story-scenes").value);
+    form.append("seconds", $("story-seconds").value);
+    form.append("crossfade", $("story-crossfade").value);
+    form.append("size", $("story-size").value);
+    form.append("orientation", $("story-orientation").value);
+    if ($("story-music").files[0]) form.append("music", $("story-music").files[0]);
+    setBusy(true);
+    try {
+      const data = await api("/api/story", { body: form });
+      watchJob(data.job_id);
+    } catch (err) {
+      setBusy(false);
+      setMsg($("text-video-msg"), err.message, true);
+    }
+  });
+
+  if ($("sora-btn")) {
+    $("sora-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      setBusy(true);
+      try {
+        const data = await api("/api/ai-video", {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: $("sora-prompt").value,
+            seconds: Number($("sora-seconds").value),
+            orientation: $("sora-orientation").value,
+          }),
+        });
+        watchJob(data.job_id);
+      } catch (err) {
+        setBusy(false);
+        setMsg($("text-video-msg"), err.message, true);
+      }
+    });
+  }
+
   renderGallery();
   renderVideos();
+  // Ha az oldal újratöltésekor még fut egy feladat, folytatjuk a követését.
+  if (state.activeJobs && state.activeJobs.length) watchJob(state.activeJobs[0]);
 })();

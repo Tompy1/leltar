@@ -29,6 +29,8 @@ from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import requests
+
 import image_generator as ig
 
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
@@ -38,6 +40,10 @@ DB_PATH = os.path.join(DATA_DIR, "app.db")
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "20"))
 MAX_VIDEO_IMAGES = int(os.environ.get("MAX_VIDEO_IMAGES", "30"))
 RATIOS = ["1:1", "16:9", "3:2", "9:16", "2:3"]
+MAX_STORY_SCENES = int(os.environ.get("MAX_STORY_SCENES", "12"))
+SORA_MODEL = os.environ.get("SORA_MODEL", "sora-2")
+AI_VIDEO_DAILY_LIMIT = int(os.environ.get("AI_VIDEO_DAILY_LIMIT", "3"))
+OPENAI_VIDEOS_URL = "https://api.openai.com/v1/videos"
 
 for d in (IMAGE_DIR, VIDEO_DIR):
     os.makedirs(d, exist_ok=True)
@@ -124,6 +130,18 @@ create table if not exists videos (
   image_count integer not null,
   created_at real not null
 );
+-- Háttérfeladatok (mese jelenetekből, AI-videó)
+create table if not exists jobs (
+  id text primary key,
+  user_id integer not null references users(id) on delete cascade,
+  kind text not null,
+  status text not null,
+  progress real not null default 0,
+  message text not null default '',
+  video_id integer,
+  created_at real not null
+);
+create index if not exists jobs_user on jobs(user_id, created_at);
 """
 
 
@@ -150,6 +168,12 @@ def close_db(_exc):
 
 _c = connect()
 _c.executescript(SCHEMA)
+if "title" not in [r[1] for r in _c.execute("pragma table_info(videos)")]:
+    _c.execute("alter table videos add column title text")
+# Újraindításkor a félbemaradt háttérfeladatok nem folytatódnak.
+_c.execute("update jobs set status = 'error', message = 'A szerver újraindult, a feladat megszakadt.' "
+           "where status = 'running'")
+_c.commit()
 _c.close()  # --preload mellett ne öröklődjön nyitott kapcsolat a workerekbe
 
 
@@ -237,18 +261,30 @@ def logout():
 
 # ---------------------------------------------------------------- oldalak
 
-def used_today(user_id):
+class UserError(Exception):
+    """Felhasználónak megjeleníthető hiba, HTTP státusszal."""
+
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+def used_today(user_id, conn=None):
     since = time.time() - 24 * 3600
-    return db().execute("select count(*) from generation_log where user_id = ? and created_at >= ?",
+    return (conn or db()).execute("select count(*) from generation_log where user_id = ? and created_at >= ?",
                         (user_id, since)).fetchone()[0]
 
 
 def image_json(row):
-    return {"id": row["id"], "prompt": row["prompt"], "url": url_for("media_image", image_id=row["id"])}
+    lines = [l for l in row["prompt"].splitlines() if l.strip()]
+    label = lines[-1] if lines else row["prompt"]  # mesénél a jelenet sora, nem a közös stílus
+    return {"id": row["id"], "prompt": row["prompt"], "label": label,
+            "url": url_for("media_image", image_id=row["id"])}
 
 
 def video_json(row):
-    return {"id": row["id"], "image_count": row["image_count"],
+    title = row["title"] or f'{row["image_count"]} kép'
+    return {"id": row["id"], "image_count": row["image_count"], "title": title,
             "created": time.strftime("%Y.%m.%d %H:%M", time.localtime(row["created_at"])),
             "url": url_for("media_video", video_id=row["id"])}
 
@@ -263,7 +299,10 @@ def index():
         "index.html", user=g.user, ratios=RATIOS,
         images=[image_json(r) for r in images], videos=[video_json(r) for r in videos],
         remaining=max(0, DAILY_LIMIT - used_today(uid)), daily_limit=DAILY_LIMIT,
-        max_video_images=MAX_VIDEO_IMAGES,
+        max_video_images=MAX_VIDEO_IMAGES, max_story_scenes=MAX_STORY_SCENES,
+        sora_enabled=bool(os.environ.get("OPENAI_API_KEY", "").strip()),
+        active_jobs=[r["id"] for r in db().execute(
+            "select id from jobs where user_id = ? and status = 'running'", (uid,))],
     )
 
 
@@ -286,6 +325,37 @@ def pick_provider():
     return None, None
 
 
+def generate_image(conn, uid, prompt, ratio, negative=None):
+    """Egy kép generálása, mentése és naplózása. Hiba esetén UserError."""
+    if used_today(uid, conn) >= DAILY_LIMIT:
+        raise UserError(f"Elérted a napi korlátot ({DAILY_LIMIT} kép / 24 óra).", 429)
+    provider, key = pick_provider()
+    if not provider:
+        raise UserError("A szerveren nincs beállítva API-kulcs (.env fájl).", 500)
+    try:
+        if provider == "openai":
+            content, _ = ig.generate_openai(prompt, ratio, "gpt-image-1", key)
+        else:
+            content, _ = ig.generate_stability(prompt, ratio, "core", key, negative)
+    except ig.GenerationError as exc:
+        app.logger.warning("Generálási hiba: %s", exc)
+        raise UserError(str(exc), 502)
+    except Exception:
+        app.logger.exception("Váratlan hiba generálás közben")
+        raise UserError("Nem sikerült elérni a képgeneráló szolgáltatást.", 502)
+
+    filename = f"{uid}_{uuid.uuid4().hex}.png"
+    with open(os.path.join(IMAGE_DIR, filename), "wb") as f:
+        f.write(content)
+    now = time.time()
+    cur = conn.execute(
+        "insert into images (user_id, prompt, provider, ratio, filename, created_at) values (?,?,?,?,?,?)",
+        (uid, prompt, provider, ratio, filename, now))
+    conn.execute("insert into generation_log (user_id, created_at) values (?, ?)", (uid, now))
+    conn.commit()
+    return conn.execute("select * from images where id = ?", (cur.lastrowid,)).fetchone(), provider
+
+
 @app.post("/api/generate")
 @login_required
 def api_generate():
@@ -297,35 +367,11 @@ def api_generate():
         return jsonify(error="Add meg, milyen képet szeretnél."), 400
     if len(prompt) > 2000:
         return jsonify(error="A leírás legfeljebb 2000 karakter lehet."), 400
-
     uid = g.user["id"]
-    if used_today(uid) >= DAILY_LIMIT:
-        return jsonify(error=f"Elérted a napi korlátot ({DAILY_LIMIT} kép / 24 óra)."), 429
-
-    provider, key = pick_provider()
-    if not provider:
-        return jsonify(error="A szerveren nincs beállítva API-kulcs (.env fájl)."), 500
     try:
-        if provider == "openai":
-            content, _ = ig.generate_openai(prompt, ratio, "gpt-image-1", key)
-        else:
-            content, _ = ig.generate_stability(prompt, ratio, "core", key, negative)
-    except ig.GenerationError as exc:
-        app.logger.warning("Generálási hiba: %s", exc)
-        return jsonify(error=str(exc)), 502
-    except Exception:
-        app.logger.exception("Váratlan hiba generálás közben")
-        return jsonify(error="Nem sikerült elérni a képgeneráló szolgáltatást."), 502
-
-    filename = f"{uid}_{uuid.uuid4().hex}.png"
-    with open(os.path.join(IMAGE_DIR, filename), "wb") as f:
-        f.write(content)
-    cur = db().execute(
-        "insert into images (user_id, prompt, provider, ratio, filename, created_at) values (?,?,?,?,?,?)",
-        (uid, prompt, provider, ratio, filename, time.time()))
-    db().execute("insert into generation_log (user_id, created_at) values (?, ?)", (uid, time.time()))
-    db().commit()
-    row = db().execute("select * from images where id = ?", (cur.lastrowid,)).fetchone()
+        row, provider = generate_image(db(), uid, prompt, ratio, negative)
+    except UserError as exc:
+        return jsonify(error=str(exc)), exc.status
     return jsonify(image=image_json(row), provider=provider,
                    remaining=max(0, DAILY_LIMIT - used_today(uid)))
 
@@ -356,72 +402,312 @@ def api_delete_image(image_id):
 
 # ---------------------------------------------------------------- videó
 
-@app.post("/api/video")
-@login_required
-def api_video():
+def video_size(form):
+    size = (1920, 1080) if form.get("size") == "1080p" else (1280, 720)
+    if form.get("orientation") == "portrait":
+        size = (size[1], size[0])
+    return size
+
+
+def video_timing(form):
+    try:
+        seconds = min(15.0, max(1.0, float(form.get("seconds", "4"))))
+        crossfade = min(seconds / 2, max(0.0, float(form.get("crossfade", "1"))))
+    except ValueError:
+        raise UserError("Hibás beállítás.")
+    return seconds, crossfade
+
+
+def save_music(files):
+    """A feltöltött zenét ideiglenes fájlba menti; visszaadja az útvonalát (vagy None)."""
+    music = files.get("music")
+    if not (music and music.filename):
+        return None
+    ext = os.path.splitext(music.filename)[1].lower()
+    if ext not in (".mp3", ".m4a", ".wav", ".ogg", ".aac"):
+        raise UserError("A zene mp3, m4a, wav, ogg vagy aac lehet.")
+    fd, path = tempfile.mkstemp(suffix=ext, dir=VIDEO_DIR)
+    with os.fdopen(fd, "wb") as f:
+        music.save(f)
+    return path
+
+
+def make_slideshow(image_paths, music_path, seconds, crossfade, size, captions):
+    """Képekből videót fűz; visszaadja a videó fájlnevét. Hiba esetén UserError."""
     import video_generator as vg  # lassú import, csak ha kell
 
-    uid = g.user["id"]
-    try:
-        ids = [int(x) for x in request.form.get("image_ids", "").split(",") if x.strip()]
-        seconds = min(15.0, max(1.0, float(request.form.get("seconds", "4"))))
-        crossfade = min(seconds / 2, max(0.0, float(request.form.get("crossfade", "1"))))
-    except ValueError:
-        return jsonify(error="Hibás beállítás."), 400
-    if not ids:
-        return jsonify(error="Jelölj ki legalább egy képet."), 400
-    if len(ids) > MAX_VIDEO_IMAGES:
-        return jsonify(error=f"Legfeljebb {MAX_VIDEO_IMAGES} kép lehet egy videóban."), 400
-
-    rows = {r["id"]: r for r in db().execute(
-        f"select * from images where user_id = ? and id in ({','.join('?' * len(ids))})", (uid, *ids))}
-    ordered = [rows[i] for i in ids if i in rows]
-    if not ordered:
-        return jsonify(error="A kijelölt képek nem találhatók."), 404
-    size = (1920, 1080) if request.form.get("size") == "1080p" else (1280, 720)
-    if request.form.get("orientation") == "portrait":
-        size = (size[1], size[0])
-    captions = [r["prompt"] for r in ordered] if request.form.get("captions") == "1" else []
-
-    music = request.files.get("music")
-    music_path = None
-    if music and music.filename:
-        ext = os.path.splitext(music.filename)[1].lower()
-        if ext not in (".mp3", ".m4a", ".wav", ".ogg", ".aac"):
-            return jsonify(error="A zene mp3, m4a, wav, ogg vagy aac lehet."), 400
-        fd, music_path = tempfile.mkstemp(suffix=ext, dir=VIDEO_DIR)
-        with os.fdopen(fd, "wb") as f:
-            music.save(f)
-
-    filename = f"{uid}_{uuid.uuid4().hex}.mp4"
+    filename = f"{uuid.uuid4().hex}.mp4"
     out_path = os.path.join(VIDEO_DIR, filename)
-    if not video_lock.acquire(timeout=600):
-        if music_path:
-            remove_file(music_path)
-        return jsonify(error="A szerver most egy másik videón dolgozik. Próbáld újra később."), 503
+    if not video_lock.acquire(timeout=900):
+        raise UserError("A szerver most egy másik videón dolgozik. Próbáld újra később.", 503)
     try:
         ok = vg.create_video_from_images(
             None, music_path, out_path,
-            duration_per_image=seconds, size=size, crossfade=crossfade if len(ordered) > 1 else 0,
-            image_files=[os.path.join(IMAGE_DIR, r["filename"]) for r in ordered],
-            captions=captions, quiet=True,
+            duration_per_image=seconds, size=size, crossfade=crossfade if len(image_paths) > 1 else 0,
+            image_files=image_paths, captions=captions, quiet=True,
         )
     except Exception:
         app.logger.exception("Videókészítési hiba")
         ok = False
     finally:
         video_lock.release()
-        if music_path:
-            remove_file(music_path)
     if not ok:
         remove_file(out_path)
-        return jsonify(error="Nem sikerült elkészíteni a videót (részletek a szerver naplójában)."), 500
+        raise UserError("Nem sikerült elkészíteni a videót (részletek a szerver naplójában).", 500)
+    return filename
 
-    cur = db().execute("insert into videos (user_id, filename, image_count, created_at) values (?,?,?,?)",
-                       (uid, filename, len(ordered), time.time()))
-    db().commit()
-    row = db().execute("select * from videos where id = ?", (cur.lastrowid,)).fetchone()
+
+def insert_video(conn, uid, filename, image_count, title=None):
+    cur = conn.execute(
+        "insert into videos (user_id, filename, image_count, created_at, title) values (?,?,?,?,?)",
+        (uid, filename, image_count, time.time(), title))
+    conn.commit()
+    return cur.lastrowid
+
+
+@app.post("/api/video")
+@login_required
+def api_video():
+    uid = g.user["id"]
+    music_path = None
+    try:
+        ids = [int(x) for x in request.form.get("image_ids", "").split(",") if x.strip().isdigit()]
+        seconds, crossfade = video_timing(request.form)
+        if not ids:
+            raise UserError("Jelölj ki legalább egy képet.")
+        if len(ids) > MAX_VIDEO_IMAGES:
+            raise UserError(f"Legfeljebb {MAX_VIDEO_IMAGES} kép lehet egy videóban.")
+        rows = {r["id"]: r for r in db().execute(
+            f"select * from images where user_id = ? and id in ({','.join('?' * len(ids))})", (uid, *ids))}
+        ordered = [rows[i] for i in ids if i in rows]
+        if not ordered:
+            raise UserError("A kijelölt képek nem találhatók.", 404)
+        captions = [r["prompt"] for r in ordered] if request.form.get("captions") == "1" else []
+        music_path = save_music(request.files)
+        filename = make_slideshow([os.path.join(IMAGE_DIR, r["filename"]) for r in ordered], music_path,
+                                  seconds, crossfade, video_size(request.form), captions)
+    except UserError as exc:
+        return jsonify(error=str(exc)), exc.status
+    finally:
+        if music_path:
+            remove_file(music_path)
+    video_id = insert_video(db(), uid, filename, len(ordered))
+    row = db().execute("select * from videos where id = ?", (video_id,)).fetchone()
     return jsonify(video=video_json(row))
+
+
+# ---------------------------------------------------------------- háttérfeladatok
+
+def update_job(job_id, **fields):
+    conn = connect()
+    try:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        conn.execute(f"update jobs set {sets} where id = ?", (*fields.values(), job_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def start_job(uid, kind, work, cleanup=None):
+    """Háttérszálon futtatja a work(conn, progress) függvényt, ami a kész videó azonosítóját adja vissza."""
+    if db().execute("select 1 from jobs where user_id = ? and status = 'running'", (uid,)).fetchone():
+        raise UserError("Már fut egy videókészítésed. Várd meg, amíg elkészül.", 409)
+    job_id = uuid.uuid4().hex
+    db().execute("insert into jobs (id, user_id, kind, status, message, created_at) values (?,?,?,?,?,?)",
+                 (job_id, uid, kind, "running", "Indítás...", time.time()))
+    db().commit()
+
+    def progress(fraction, message):
+        update_job(job_id, progress=max(0.0, min(1.0, fraction)), message=message)
+
+    def runner():
+        conn = connect()
+        try:
+            video_id = work(conn, progress)
+            update_job(job_id, status="done", progress=1.0, message="Kész!", video_id=video_id)
+        except UserError as exc:
+            update_job(job_id, status="error", message=str(exc))
+        except Exception:
+            app.logger.exception("Háttérfeladat hiba (%s)", kind)
+            update_job(job_id, status="error", message="Váratlan hiba (részletek a szerver naplójában).")
+        finally:
+            conn.close()
+            if cleanup:
+                cleanup()
+
+    threading.Thread(target=runner, daemon=True, name=f"job-{kind}").start()
+    return job_id
+
+
+@app.get("/api/jobs/<job_id>")
+@login_required
+def api_job(job_id):
+    row = db().execute("select * from jobs where id = ? and user_id = ?", (job_id, g.user["id"])).fetchone()
+    if row is None:
+        abort(404)
+    out = {"id": row["id"], "kind": row["kind"], "status": row["status"],
+           "progress": row["progress"], "message": row["message"]}
+    if row["video_id"]:
+        video = db().execute("select * from videos where id = ?", (row["video_id"],)).fetchone()
+        if video:
+            out["video"] = video_json(video)
+    return jsonify(out)
+
+
+# ---------------------------------------------------------------- mese jelenetekből
+
+def parse_scenes(text):
+    """Soronként egy jelenet. Opcionálisan: 'kép leírása | felirat a videóban'."""
+    scenes = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        prompt, _, caption = line.partition("|")
+        if prompt.strip():
+            scenes.append((prompt.strip()[:1500], caption.strip()[:200]))
+    return scenes
+
+
+@app.post("/api/story")
+@login_required
+def api_story():
+    uid = g.user["id"]
+    music_path = None
+    try:
+        style = request.form.get("style", "").strip()[:1000]
+        scenes = parse_scenes(request.form.get("scenes", ""))
+        if not scenes:
+            raise UserError("Írj legalább egy jelenetet (soronként egyet).")
+        if len(scenes) > MAX_STORY_SCENES:
+            raise UserError(f"Legfeljebb {MAX_STORY_SCENES} jelenet lehet egy mesében.")
+        left = DAILY_LIMIT - used_today(uid)
+        if len(scenes) > left:
+            raise UserError(f"Ehhez {len(scenes)} kép kell, de ma már csak {max(0, left)} generálható.", 429)
+        seconds, crossfade = video_timing(request.form)
+        size = video_size(request.form)
+        ratio = "9:16" if request.form.get("orientation") == "portrait" else "16:9"
+        title = request.form.get("title", "").strip()[:80] or f"Mese ({len(scenes)} jelenet)"
+        music_path = save_music(request.files)
+    except UserError as exc:
+        if music_path:
+            remove_file(music_path)
+        return jsonify(error=str(exc)), exc.status
+
+    def work(conn, progress):
+        paths, captions = [], []
+        for i, (scene, caption) in enumerate(scenes):
+            progress(i / (len(scenes) + 1), f"Kép készítése: {i + 1} / {len(scenes)}")
+            prompt = f"{style}\n{scene}" if style else scene
+            row, _ = generate_image(conn, uid, prompt, ratio)
+            paths.append(os.path.join(IMAGE_DIR, row["filename"]))
+            captions.append(caption)
+        progress(len(scenes) / (len(scenes) + 1), "Videó összefűzése...")
+        filename = make_slideshow(paths, music_path, seconds, crossfade, size,
+                                  captions if any(captions) else [])
+        return insert_video(conn, uid, filename, len(paths), title)
+
+    try:
+        job_id = start_job(uid, "story", work, cleanup=(lambda: remove_file(music_path)) if music_path else None)
+    except UserError as exc:
+        if music_path:
+            remove_file(music_path)
+        return jsonify(error=str(exc)), exc.status
+    return jsonify(job_id=job_id)
+
+
+# ---------------------------------------------------------------- AI-videó (OpenAI Sora)
+
+def sora_error(resp):
+    hints = {
+        400: "Az OpenAI elutasította a kérést (pl. a leírás nem felel meg a tartalmi szabályoknak).",
+        401: "Az OpenAI API-kulcs hibás vagy visszavont.",
+        403: "Az OpenAI fiókodnak nincs hozzáférése a Sora videómodellhez (lehet, hogy szervezeti azonosítás kell).",
+        404: "A Sora videómodell nem érhető el ezzel a fiókkal.",
+        429: "Túl sok kérés, vagy elfogyott a keret/kredit az OpenAI-nál.",
+    }
+    try:
+        detail = resp.json().get("error", {}).get("message", "")
+    except ValueError:
+        detail = resp.text[:300]
+    app.logger.warning("Sora hiba %s: %s", resp.status_code, detail)
+    base = hints.get(resp.status_code, f"Az OpenAI hibát jelzett ({resp.status_code}).")
+    return UserError(f"{base} {detail}".strip(), 502)
+
+
+def sora_generate(prompt, seconds, size, key, progress, out_path):
+    headers = {"Authorization": f"Bearer {key}"}
+    fields = {"model": SORA_MODEL, "prompt": prompt, "seconds": str(seconds), "size": size}
+    resp = requests.post(OPENAI_VIDEOS_URL, headers=headers, timeout=60,
+                         files={k: (None, v) for k, v in fields.items()})
+    if resp.status_code >= 300:
+        raise sora_error(resp)
+    job = resp.json()
+    deadline = time.time() + 30 * 60
+    while job.get("status") in ("queued", "in_progress"):
+        pct = float(job.get("progress") or 0)
+        progress(pct / 100 * 0.95, "Sorban áll az OpenAI-nál..." if job["status"] == "queued"
+                 else f"Az AI készíti a videót... {pct:.0f}%")
+        if time.time() > deadline:
+            raise UserError("Az AI-videó 30 perc alatt sem készült el.", 504)
+        time.sleep(8)
+        resp = requests.get(f"{OPENAI_VIDEOS_URL}/{job['id']}", headers=headers, timeout=60)
+        if resp.status_code >= 300:
+            raise sora_error(resp)
+        job = resp.json()
+    if job.get("status") != "completed":
+        err = job.get("error") or {}
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        raise UserError(f"Az AI-videó nem készült el: {msg or job.get('status')}", 502)
+    progress(0.97, "Videó letöltése...")
+    with requests.get(f"{OPENAI_VIDEOS_URL}/{job['id']}/content", headers=headers,
+                      timeout=300, stream=True) as resp:
+        if resp.status_code >= 300:
+            raise sora_error(resp)
+        with open(out_path, "wb") as f:
+            for chunk in resp.iter_content(1 << 20):
+                f.write(chunk)
+
+
+@app.post("/api/ai-video")
+@login_required
+def api_ai_video():
+    uid = g.user["id"]
+    data = request.get_json(silent=True) or {}
+    prompt = str(data.get("prompt", "")).strip()
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    try:
+        if not key:
+            raise UserError("AI-videóhoz OpenAI API-kulcs kell (OPENAI_API_KEY a .env fájlban).", 400)
+        if not prompt:
+            raise UserError("Írd le, milyen videót szeretnél.")
+        if len(prompt) > 2000:
+            raise UserError("A leírás legfeljebb 2000 karakter lehet.")
+        seconds = int(data.get("seconds", 8))
+        if seconds not in (4, 8, 12):
+            seconds = 8
+        size = "720x1280" if data.get("orientation") == "portrait" else "1280x720"
+        since = time.time() - 24 * 3600
+        used = db().execute("select count(*) from jobs where user_id = ? and kind = 'sora' "
+                            "and status != 'error' and created_at >= ?", (uid, since)).fetchone()[0]
+        if used >= AI_VIDEO_DAILY_LIMIT:
+            raise UserError(f"Elérted a napi AI-videó korlátot ({AI_VIDEO_DAILY_LIMIT} / 24 óra).", 429)
+
+        def work(conn, progress):
+            filename = f"{uuid.uuid4().hex}.mp4"
+            out_path = os.path.join(VIDEO_DIR, filename)
+            try:
+                sora_generate(prompt, seconds, size, key, progress, out_path)
+            except BaseException:
+                remove_file(out_path)
+                raise
+            title = "AI-videó: " + (prompt[:60] + "..." if len(prompt) > 60 else prompt)
+            return insert_video(conn, uid, filename, 0, title)
+
+        job_id = start_job(uid, "sora", work)
+    except UserError as exc:
+        return jsonify(error=str(exc)), exc.status
+    return jsonify(job_id=job_id)
 
 
 @app.post("/api/videos/<int:video_id>/delete")

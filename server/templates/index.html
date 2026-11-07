@@ -51,6 +51,83 @@
       </figcaption>
     </figure>
 
+    <!-- Videó szövegből -->
+    <section class="card" id="text-video">
+      <h2>Videó szövegből</h2>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" class="tab" data-tab="story" aria-selected="true">Mese jelenetekből</button>
+        <button type="button" role="tab" class="tab" data-tab="sora" aria-selected="false">AI-videó (Sora)</button>
+      </div>
+
+      <form id="story-form" data-panel="story">
+        <p class="hint">Minden sor egy jelenet: az alkalmazás mindegyikhez képet generál, majd videóvá fűzi őket.
+          Ha egy sor végére <b>| szöveget</b> írsz, az feliratként jelenik meg a videóban
+          (pl. <i>Pip looks at the flower | Pip meglátja a virágot</i>).</p>
+        <label>Cím (opcionális)
+          <input id="story-title" maxlength="80" placeholder="pl. Pip, a kis felhő">
+        </label>
+        <label>Közös stílus és szereplő (minden jelenethez hozzáadódik)
+          <textarea id="story-style" rows="3" maxlength="1000"
+            placeholder="pl. Children's picture book illustration, soft watercolor style, pastel colors. A small round fluffy white cloud character named Pip with big sparkly blue eyes and rosy cheeks."></textarea>
+        </label>
+        <label>Jelenetek – soronként egy (legfeljebb {{ max_story_scenes }})
+          <textarea id="story-scenes" rows="6" required
+            placeholder="Pip floating in a bright morning sky above green hills | Jó reggelt, Pip!&#10;Pip looking worried at a drooping yellow flower | Szomorú a kis virág...&#10;Pip gently raining onto the flower | Pip megöntözi&#10;Pip laughing next to a big rainbow | Szivárvány!"></textarea>
+        </label>
+        <div class="row">
+          <label>Mp / jelenet
+            <input type="number" id="story-seconds" min="1" max="15" step="0.5" value="4">
+          </label>
+          <label>Áttűnés (mp)
+            <input type="number" id="story-crossfade" min="0" max="5" step="0.5" value="1">
+          </label>
+          <label>Felbontás
+            <select id="story-size"><option value="720p">720p</option><option value="1080p">1080p</option></select>
+          </label>
+          <label>Tájolás
+            <select id="story-orientation"><option value="landscape">Fekvő (16:9)</option><option value="portrait">Álló (9:16)</option></select>
+          </label>
+        </div>
+        <label>Háttérzene (opcionális)
+          <input type="file" id="story-music" accept=".mp3,.m4a,.wav,.ogg,.aac,audio/*">
+        </label>
+        <div class="row center">
+          <button type="submit" id="story-btn">Mese elkészítése</button>
+          <span class="hint" id="story-count"></span>
+        </div>
+      </form>
+
+      <form id="sora-form" data-panel="sora" hidden>
+        {% if sora_enabled %}
+        <p class="hint">Valódi, mozgó AI-videó egyetlen leírásból (OpenAI Sora). Ehhez az OpenAI-fiókodban
+          engedélyezett Sora-hozzáférés kell; egy videó elkészítése több percig is tarthat, és díjköteles.</p>
+        <label>Milyen videót szeretnél? (angolul működik a legjobban)
+          <textarea id="sora-prompt" rows="4" maxlength="2000" required
+            placeholder="A cute fluffy white cloud with big blue eyes floats over a sunny meadow, gently rains on a small yellow flower, the flower blooms and a rainbow appears. Soft pastel 3D animation for kids, slow camera pan."></textarea>
+        </label>
+        <div class="row">
+          <label>Hossz
+            <select id="sora-seconds"><option value="4">4 mp</option><option value="8" selected>8 mp</option><option value="12">12 mp</option></select>
+          </label>
+          <label>Tájolás
+            <select id="sora-orientation"><option value="landscape">Fekvő (16:9)</option><option value="portrait">Álló (9:16)</option></select>
+          </label>
+        </div>
+        <button type="submit" id="sora-btn">AI-videó készítése</button>
+        {% else %}
+        <p class="hint">AI-videóhoz OpenAI API-kulcs szükséges. Írd be a szerveren a <b>.env</b> fájl
+          <b>OPENAI_API_KEY</b> sorába, majd futtasd: <code>docker compose up -d</code>.
+          Addig a „Mese jelenetekből” mód használható.</p>
+        {% endif %}
+      </form>
+
+      <div id="job-box" hidden>
+        <progress id="job-progress" max="1" value="0"></progress>
+        <p id="job-msg" class="msg" role="status"></p>
+      </div>
+      <p id="text-video-msg" class="msg" role="status"></p>
+    </section>
+
     <!-- Galéria -->
     <h2>Képeim</h2>
     <p class="hint">Kattints a képekre a kijelöléshez – a kijelölt képekből videót készíthetsz. A sorrend a kijelölés sorrendje.</p>
@@ -59,7 +136,7 @@
 
     <!-- Videó -->
     <form id="video-form" class="card">
-      <h2>Videó a kijelölt képekből</h2>
+      <h2>Videó a kijelölt képekből (kézi összeállítás)</h2>
       <p class="hint"><b id="sel-count">0</b> kép kijelölve (legfeljebb {{ max_video_images }}).
         <button type="button" id="sel-clear" class="link">Kijelölés törlése</button></p>
       <div class="row">
@@ -91,7 +168,7 @@
     <div id="videos" class="videos"></div>
   </main>
 
-  <script id="initial-data" type="application/json">{{ {"images": images, "videos": videos, "maxVideoImages": max_video_images} | tojson }}</script>
+  <script id="initial-data" type="application/json">{{ {"images": images, "videos": videos, "maxVideoImages": max_video_images, "maxStoryScenes": max_story_scenes, "activeJobs": active_jobs} | tojson }}</script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>
