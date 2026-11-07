@@ -72,9 +72,17 @@ def api_error(resp):
         msg = msg or data.get("message") or data.get("errors") or data.get("name") or resp.text
     except ValueError:
         msg = resp.text
-    hints = {401: " (hibás vagy visszavont kulcs – biztosan ehhez a szolgáltatóhoz tartozik?)",
-             402: " (nincs elég kredit)", 429: " (túl sok kérés vagy elfogyott a keret)"}
-    return GenerationError(f"API hiba {resp.status_code}: {msg}{hints.get(resp.status_code, '')}")
+    if isinstance(msg, (list, tuple)):
+        msg = " ".join(str(m) for m in msg)
+    friendly = {
+        401: "Az API-kulcs hibás vagy visszavont – biztosan ehhez a szolgáltatóhoz tartozik?",
+        402: "Elfogyott a kredit a szolgáltatónál. Vásárolj kreditet: Stability AI esetén "
+             "platform.stability.ai/account/credits, OpenAI esetén platform.openai.com/settings/organization/billing.",
+        429: "Túl sok kérés, vagy elfogyott a keret a szolgáltatónál. Próbáld újra kicsit később.",
+    }
+    if resp.status_code in friendly:
+        return GenerationError(f"{friendly[resp.status_code]} (API hiba {resp.status_code})")
+    return GenerationError(f"API hiba {resp.status_code}: {msg}")
 
 
 def generate_openai(prompt, ratio, model, key):
