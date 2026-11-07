@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Képgeneráló</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>AI Képgeneráló</h1>
+      <form method="post" action="{{ url_for('logout') }}" id="user-bar">
+        <span>{{ user.email }}</span>
+        <button type="submit" class="secondary">Kijelentkezés</button>
+      </form>
+    </header>
+
+    <!-- Képgenerálás -->
+    <form id="gen-form" class="card">
+      <label>Milyen képet szeretnél?
+        <textarea id="prompt" rows="3" maxlength="2000" required
+          placeholder="pl. egy piros macska a holdon, akvarell stílusban"></textarea>
+      </label>
+      <div class="row">
+        <label>Képarány
+          <select id="ratio">
+            <option value="1:1">Négyzet (1:1)</option>
+            <option value="16:9">Fekvő (16:9)</option>
+            <option value="3:2">Fekvő (3:2)</option>
+            <option value="9:16">Álló (9:16)</option>
+            <option value="2:3">Álló (2:3)</option>
+          </select>
+        </label>
+        <label class="grow">Ne legyen a képen (csak Stability AI)
+          <input id="negative" maxlength="1000" placeholder="pl. szöveg, elmosódás">
+        </label>
+      </div>
+      <div class="row center">
+        <button type="submit" id="gen-btn">Generálás</button>
+        <span class="hint">Ma még <b id="remaining">{{ remaining }}</b> / {{ daily_limit }} kép generálható.</span>
+      </div>
+      <p id="gen-msg" class="msg" role="status"></p>
+    </form>
+
+    <figure id="result" class="card" hidden>
+      <img id="result-img" alt="">
+      <figcaption>
+        <span id="result-caption"></span>
+        <a id="result-download">Letöltés</a>
+      </figcaption>
+    </figure>
+
+    <!-- Galéria -->
+    <h2>Képeim</h2>
+    <p class="hint">Kattints a képekre a kijelöléshez – a kijelölt képekből videót készíthetsz. A sorrend a kijelölés sorrendje.</p>
+    <p id="gallery-empty" class="hint" hidden>Még nincs generált képed.</p>
+    <div id="gallery" class="gallery"></div>
+
+    <!-- Videó -->
+    <form id="video-form" class="card">
+      <h2>Videó a kijelölt képekből</h2>
+      <p class="hint"><b id="sel-count">0</b> kép kijelölve (legfeljebb {{ max_video_images }}).
+        <button type="button" id="sel-clear" class="link">Kijelölés törlése</button></p>
+      <div class="row">
+        <label>Mp / kép
+          <input type="number" id="seconds" min="1" max="15" step="0.5" value="4">
+        </label>
+        <label>Áttűnés (mp)
+          <input type="number" id="crossfade" min="0" max="5" step="0.5" value="1">
+        </label>
+        <label>Felbontás
+          <select id="size"><option value="720p">720p</option><option value="1080p">1080p</option></select>
+        </label>
+        <label>Tájolás
+          <select id="orientation"><option value="landscape">Fekvő</option><option value="portrait">Álló (Reels/TikTok)</option></select>
+        </label>
+      </div>
+      <div class="row">
+        <label class="grow">Háttérzene (opcionális)
+          <input type="file" id="music" accept=".mp3,.m4a,.wav,.ogg,.aac,audio/*">
+        </label>
+        <label class="check"><input type="checkbox" id="captions"> Leírás feliratként</label>
+      </div>
+      <button type="submit" id="video-btn">Videó készítése</button>
+      <p id="video-msg" class="msg" role="status"></p>
+    </form>
+
+    <h2>Videóim</h2>
+    <p id="videos-empty" class="hint" hidden>Még nincs videód.</p>
+    <div id="videos" class="videos"></div>
+  </main>
+
+  <script id="initial-data" type="application/json">{{ {"images": images, "videos": videos, "maxVideoImages": max_video_images} | tojson }}</script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

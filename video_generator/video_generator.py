@@ -11,6 +11,7 @@ Használat:
 import argparse
 import os
 import sys
+import textwrap
 
 from moviepy import (
     AudioFileClip,
@@ -55,14 +56,18 @@ def fit_image(img_path, size, duration):
 
 def make_caption(text, size, duration, font):
     w, h = size
-    txt = TextClip(
-        font=font,
-        text=text,
-        font_size=max(24, h // 18),
-        color="white",
-        bg_color="black",
-        margin=(20, 10),
-    )
+    if len(text) > 140:
+        text = text[:137].rstrip() + "..."
+    font_size = max(24, h // 18)
+    kwargs = dict(font=font, text=text, font_size=font_size, color="white",
+                  bg_color="black", margin=(20, 10))
+    txt = TextClip(**kwargs)
+    if txt.w > w * 0.9:  # túl hosszú: szóhatáron tördelés, kisebb betűvel, középre
+        font_size = max(20, h // 26)
+        per_line = max(10, int(w * 0.85 / (font_size * 0.6)))
+        kwargs.update(font_size=font_size, text="\n".join(textwrap.wrap(text, per_line)),
+                      text_align="center", interline=6)
+        txt = TextClip(**kwargs)
     return txt.with_position(("center", h - txt.h - h // 20)).with_duration(duration)
 
 
@@ -85,12 +90,22 @@ def create_video_from_images(
     caption="Jelenet {n}",
     crossfade=0.0,
     fps=24,
+    image_files=None,
+    captions=None,
+    quiet=False,
 ):
-    image_files = sorted(
-        os.path.join(image_folder, f)
-        for f in os.listdir(image_folder)
-        if f.lower().endswith(VALID_EXTENSIONS)
-    )
+    """Videó készítése.
+
+    image_files: ha meg van adva, ezeket a képeket használja (ebben a sorrendben) a mappa helyett.
+    captions: képenkénti felirat-lista; ha meg van adva, a `caption` sablont felülírja.
+    quiet: nincs folyamatjelző kiírás (szerveren hasznos).
+    """
+    if image_files is None:
+        image_files = sorted(
+            os.path.join(image_folder, f)
+            for f in os.listdir(image_folder)
+            if f.lower().endswith(VALID_EXTENSIONS)
+        )
     if not image_files:
         print(f"Nem találhatók képek a(z) '{image_folder}' mappában!")
         return False
@@ -99,9 +114,14 @@ def create_video_from_images(
     clips = []
     for index, img_path in enumerate(image_files):
         clip = fit_image(img_path, size, duration_per_image)
-        if caption:
+        if captions is not None:
+            text = captions[index] if index < len(captions) else ""
+        elif caption:
             name = os.path.splitext(os.path.basename(img_path))[0]
             text = caption.format(n=index + 1, nev=name)
+        else:
+            text = ""
+        if text:
             try:
                 txt = make_caption(text, size, duration_per_image, font)
                 clip = CompositeVideoClip([clip, txt], size=size)
@@ -116,11 +136,15 @@ def create_video_from_images(
 
     if audio_path and os.path.exists(audio_path):
         full_video = full_video.with_audio(build_audio(audio_path, full_video.duration))
-    else:
+    elif audio_path:
         print(f"Figyelem: a hangfájl ({audio_path}) nem található. A videó néma lesz.")
 
     print(f"Videó renderelése folyamatban... ({len(clips)} kép, {full_video.duration:.1f} mp)")
-    full_video.write_videofile(output_path, fps=fps, codec="libx264", audio_codec="aac")
+    tmp_audio = os.path.splitext(output_path)[0] + "_tmp_audio.m4a"
+    full_video.write_videofile(
+        output_path, fps=fps, codec="libx264", audio_codec="aac",
+        temp_audiofile=tmp_audio, logger=None if quiet else "bar",
+    )
     full_video.close()
     print(f"Sikeres generálás! A videó mentve: {output_path}")
     return True

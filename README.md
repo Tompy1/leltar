@@ -17,3 +17,16 @@ Szövegből kép (OpenAI / Stability AI): lásd `image_generator/README.md`.
 
 Bejelentkezéssel védett webes képgeneráló: `web/` (weboldal), `supabase/` (Edge Function + adatbázis).
 Telepítés lépésről lépésre: **[DEPLOY.md](DEPLOY.md)**.
+
+## Saját VPS szerveren (ajánlott)
+
+Minden egyben: bejelentkezés, AI képgenerálás, galéria és videókészítés a képekből.
+`server/` (Flask alkalmazás), `docker-compose.yml` (alkalmazás + Caddy HTTPS).
+
+```
+cp .env.example .env && nano .env
+docker compose up -d --build
+docker compose exec app flask --app app add-user te@pelda.hu
+```
+
+Lépésről lépésre: **VPS_telepitesi_utmutato.pdf**.

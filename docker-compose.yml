@@ -1,0 +1,31 @@
+# AI Képgeneráló – VPS telepítés.  Indítás: docker compose up -d --build
+services:
+  app:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    env_file: .env
+    volumes:
+      - appdata:/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./server/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  appdata:
+  caddy_data:
+  caddy_config:

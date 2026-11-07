@@ -1,0 +1,10 @@
+# SITE_ADDRESS a .env fájlból jön:
+#   - domain esetén (pl. kepek.pelda.hu) a Caddy automatikusan HTTPS tanúsítványt kér
+#   - domain nélkül ":80" -> sima http a szerver IP címén
+{$SITE_ADDRESS} {
+	encode gzip
+	request_body {
+		max_size 40MB
+	}
+	reverse_proxy app:8000
+}

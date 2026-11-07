@@ -1,0 +1,9 @@
+node_modules
+out
+.git
+.env
+**/__pycache__
+**/generalt_kepek
+web
+supabase
+*.pdf

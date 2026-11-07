@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bejelentkezés – AI Képgeneráló</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="narrow">
+    <h1>AI Képgeneráló</h1>
+    <form method="post" class="card">
+      <h2>Bejelentkezés</h2>
+      <label>E-mail
+        <input type="email" name="email" autocomplete="email" required autofocus>
+      </label>
+      <label>Jelszó
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit">Belépés</button>
+      {% if error %}<p class="msg error" role="alert">{{ error }}</p>{% endif %}
+      <p class="hint">Fiókot csak a szerver gazdája hozhat létre.</p>
+    </form>
+  </main>
+</body>
+</html>
