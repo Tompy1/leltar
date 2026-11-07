@@ -8,3 +8,7 @@
 ## Python videógeneráló
 
 Képekből + zenéből videó: lásd `video_generator/README.md`.
+
+## AI képgeneráló
+
+Szövegből kép (OpenAI / Stability AI): lásd `image_generator/README.md`.
