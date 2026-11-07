@@ -25,6 +25,7 @@ from functools import wraps
 import click
 from flask import (Flask, abort, g, jsonify, redirect, render_template, request,
                    send_file, session, url_for)
+from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -64,16 +65,24 @@ def load_secret_key():
     raise RuntimeError("A titkos kulcs fájlja üres: " + path)
 
 
-site = os.environ.get("SITE_ADDRESS", "")
-HTTPS = bool(site) and not site.startswith((":", "http://"))
+
+
+class SessionInterface(SecureCookieSessionInterface):
+    """A süti csak akkor kap Secure jelzést, ha a kérés ténylegesen https-en jött.
+
+    Így http-n (IP címen, domain nélkül) is működik a bejelentkezés, https-en pedig biztonságos.
+    """
+
+    def get_cookie_secure(self, app):
+        return request.is_secure
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+app.session_interface = SessionInterface()
 app.config.update(
     SECRET_KEY=load_secret_key(),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=HTTPS,
     PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 14,
     MAX_CONTENT_LENGTH=40 * 1024 * 1024,
 )
