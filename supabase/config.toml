@@ -1,0 +1,6 @@
+# Minimális Supabase CLI beállítás. A projekthez kötés: `supabase link --project-ref <azonosító>`
+project_id = "leltar"
+
+[functions.generate-image]
+# Csak érvényes bejelentkezési tokennel hívható.
+verify_jwt = true

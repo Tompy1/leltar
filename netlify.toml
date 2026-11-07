@@ -1,0 +1,11 @@
+[build]
+  base = "/"
+  publish = "web"
+  command = "sh web/make-config.sh"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
