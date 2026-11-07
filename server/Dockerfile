@@ -23,5 +23,5 @@ USER app
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"
-CMD ["gunicorn", "--workers", "2", "--threads", "4", "--timeout", "900", \
+CMD ["gunicorn", "--preload", "--workers", "2", "--threads", "4", "--timeout", "900", \
      "--bind", "0.0.0.0:8000", "--access-logfile", "-", "app:app"]

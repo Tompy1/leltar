@@ -47,12 +47,21 @@ def load_secret_key():
     if key:
         return key
     path = os.path.join(DATA_DIR, "secret_key")
-    if not os.path.exists(path):
-        with open(path, "w") as f:
+    # Atomikus létrehozás: több gunicorn worker egyszerre indul, mindnek UGYANAZT a kulcsot kell használnia.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "w") as f:
             f.write(secrets.token_hex(32))
-        os.chmod(path, 0o600)
-    with open(path) as f:
-        return f.read().strip()
+    for _ in range(50):  # ha egy másik worker épp most írja, megvárjuk
+        with open(path) as f:
+            key = f.read().strip()
+        if key:
+            return key
+        time.sleep(0.1)
+    raise RuntimeError("A titkos kulcs fájlja üres: " + path)
 
 
 site = os.environ.get("SITE_ADDRESS", "")
@@ -130,8 +139,9 @@ def close_db(_exc):
         conn.close()
 
 
-with connect() as _c:
-    _c.executescript(SCHEMA)
+_c = connect()
+_c.executescript(SCHEMA)
+_c.close()  # --preload mellett ne öröklődjön nyitott kapcsolat a workerekbe
 
 
 # ---------------------------------------------------------------- bejelentkezés
