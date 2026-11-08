@@ -20,9 +20,11 @@ import tempfile
 import threading
 import time
 import uuid
+from urllib.parse import unquote
 from functools import wraps
 
 import click
+import hmac
 from flask import (Flask, abort, g, jsonify, redirect, render_template, request,
                    send_file, session, url_for)
 from flask.sessions import SecureCookieSessionInterface
@@ -44,6 +46,9 @@ MAX_STORY_SCENES = int(os.environ.get("MAX_STORY_SCENES", "12"))
 SORA_MODEL = os.environ.get("SORA_MODEL", "sora-2")
 AI_VIDEO_DAILY_LIMIT = int(os.environ.get("AI_VIDEO_DAILY_LIMIT", "3"))
 OPENAI_VIDEOS_URL = "https://api.openai.com/v1/videos"
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "").strip()
+LOCAL_TIMEOUT = int(os.environ.get("LOCAL_TIMEOUT", "600"))
+WORKER_ONLINE_SECONDS = 90
 
 for d in (IMAGE_DIR, VIDEO_DIR):
     os.makedirs(d, exist_ok=True)
@@ -142,6 +147,23 @@ create table if not exists jobs (
   created_at real not null
 );
 create index if not exists jobs_user on jobs(user_id, created_at);
+-- Otthoni gépnek (worker) szánt képgenerálási feladatok
+create table if not exists gen_tasks (
+  id text primary key,
+  prompt text not null,
+  negative text,
+  ratio text not null,
+  status text not null,            -- queued / working / done / error / cancelled
+  result_file text,
+  error text,
+  created_at real not null,
+  claimed_at real
+);
+create table if not exists worker_status (
+  id integer primary key check (id = 1),
+  last_seen real not null,
+  info text
+);
 """
 
 
@@ -301,6 +323,7 @@ def index():
         remaining=max(0, DAILY_LIMIT - used_today(uid)), daily_limit=DAILY_LIMIT,
         max_video_images=MAX_VIDEO_IMAGES, max_story_scenes=MAX_STORY_SCENES,
         sora_enabled=bool(os.environ.get("OPENAI_API_KEY", "").strip()),
+        provider_label=provider_label(),
         active_jobs=[r["id"] for r in db().execute(
             "select id from jobs where user_id = ? and status = 'running'", (uid,))],
     )
@@ -317,6 +340,8 @@ def pick_provider():
     wanted = os.environ.get("IMAGE_PROVIDER", "").lower()
     keys = {"openai": os.environ.get("OPENAI_API_KEY", "").strip(),
             "stability": os.environ.get("STABILITY_API_KEY", "").strip()}
+    if wanted == "local" or (WORKER_TOKEN and wanted not in keys):
+        return ("local", None) if WORKER_TOKEN else (None, None)
     if wanted in keys and keys[wanted]:
         return wanted, keys[wanted]
     for name in ("openai", "stability"):
@@ -333,7 +358,9 @@ def generate_image(conn, uid, prompt, ratio, negative=None):
     if not provider:
         raise UserError("A szerveren nincs beállítva API-kulcs (.env fájl).", 500)
     try:
-        if provider == "openai":
+        if provider == "local":
+            content = generate_local(conn, prompt, ratio, negative)
+        elif provider == "openai":
             content, _ = ig.generate_openai(prompt, ratio, "gpt-image-1", key)
         else:
             content, _ = ig.generate_stability(prompt, ratio, "core", key, negative)
@@ -494,6 +521,115 @@ def api_video():
     video_id = insert_video(db(), uid, filename, len(ordered))
     row = db().execute("select * from videos where id = ?", (video_id,)).fetchone()
     return jsonify(video=video_json(row))
+
+
+# ---------------------------------------------------------------- otthoni gép (worker)
+
+def worker_last_seen(conn=None):
+    row = (conn or db()).execute("select last_seen, info from worker_status where id = 1").fetchone()
+    return (row["last_seen"], row["info"]) if row else (0, None)
+
+
+def worker_online(conn=None):
+    return time.time() - worker_last_seen(conn)[0] < WORKER_ONLINE_SECONDS
+
+
+def provider_label():
+    provider, _ = pick_provider()
+    if provider == "local":
+        last, info = worker_last_seen()
+        if time.time() - last < WORKER_ONLINE_SECONDS:
+            return f"Otthoni gép: online ({info})" if info else "Otthoni gép: online"
+        return "Otthoni gép: OFFLINE – indítsd el rajta a workert"
+    return {"openai": "OpenAI", "stability": "Stability AI"}.get(provider, "nincs beállítva")
+
+
+def generate_local(conn, prompt, ratio, negative):
+    """Feladatot tesz a sorba az otthoni gépnek, és megvárja az eredményt (PNG bájtok)."""
+    if not worker_online(conn):
+        raise ig.GenerationError("Az otthoni gép nem elérhető. Kapcsold be, és indítsd el rajta a workert "
+                                 "(start_windows.bat / start_linux.sh).")
+    task_id = uuid.uuid4().hex
+    conn.execute("insert into gen_tasks (id, prompt, negative, ratio, status, created_at) values (?,?,?,?,?,?)",
+                 (task_id, prompt, negative, ratio, "queued", time.time()))
+    conn.commit()
+    deadline = time.time() + LOCAL_TIMEOUT
+    try:
+        while time.time() < deadline:
+            time.sleep(1)
+            row = conn.execute("select status, result_file, error from gen_tasks where id = ?",
+                               (task_id,)).fetchone()
+            if row["status"] == "done":
+                path = os.path.join(IMAGE_DIR, row["result_file"])
+                with open(path, "rb") as f:
+                    content = f.read()
+                remove_file(path)
+                return content
+            if row["status"] == "error":
+                raise ig.GenerationError(f"Az otthoni gép hibát jelzett: {row['error']}")
+            if row["status"] == "queued" and not worker_online(conn):
+                raise ig.GenerationError("Az otthoni gép közben elérhetetlenné vált.")
+        raise ig.GenerationError(f"Az otthoni gép {LOCAL_TIMEOUT // 60} perc alatt sem készült el a képpel.")
+    finally:
+        # Ha nem lett kész, a feladat ne maradjon a sorban.
+        conn.execute("update gen_tasks set status = 'cancelled' where id = ? and status in ('queued', 'working')",
+                     (task_id,))
+        conn.execute("delete from gen_tasks where id = ? and status != 'working'", (task_id,))
+        conn.commit()
+
+
+def worker_auth():
+    if not WORKER_TOKEN:
+        abort(404)
+    sent = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(sent.encode(), WORKER_TOKEN.encode()):
+        abort(401)
+
+
+@app.post("/worker/next")
+def worker_next():
+    """Az otthoni gép kérdezi: van munka? Legfeljebb ~25 mp-ig vár (long polling)."""
+    worker_auth()
+    info = unquote(request.headers.get("X-Worker-Info", ""))[:120]
+    conn = db()
+    deadline = time.time() + 25
+    while True:
+        now = time.time()
+        conn.execute("insert into worker_status (id, last_seen, info) values (1, ?, ?) "
+                     "on conflict(id) do update set last_seen = excluded.last_seen, info = excluded.info",
+                     (now, info))
+        # 15 percnél régebben felvett, be nem fejezett feladatok újra sorba kerülnek
+        conn.execute("update gen_tasks set status = 'queued', claimed_at = null "
+                     "where status = 'working' and claimed_at < ?", (now - 900,))
+        row = conn.execute(
+            "update gen_tasks set status = 'working', claimed_at = ? where id = ("
+            "  select id from gen_tasks where status = 'queued' order by created_at limit 1"
+            ") and status = 'queued' returning id, prompt, negative, ratio", (now,)).fetchone()
+        conn.commit()
+        if row:
+            return jsonify(id=row["id"], prompt=row["prompt"], negative=row["negative"], ratio=row["ratio"])
+        if now >= deadline:
+            return "", 204
+        time.sleep(1)
+
+
+@app.post("/worker/result/<task_id>")
+def worker_result(task_id):
+    worker_auth()
+    conn = db()
+    row = conn.execute("select status from gen_tasks where id = ?", (task_id,)).fetchone()
+    if row is None or row["status"] != "working":
+        return jsonify(ok=False, reason="A feladatot közben visszavonták."), 409
+    image = request.files.get("image")
+    if image:
+        filename = f"tmp_{task_id}.png"
+        image.save(os.path.join(IMAGE_DIR, filename))
+        conn.execute("update gen_tasks set status = 'done', result_file = ? where id = ?", (filename, task_id))
+    else:
+        error = request.form.get("error", "ismeretlen hiba")[:500]
+        conn.execute("update gen_tasks set status = 'error', error = ? where id = ?", (error, task_id))
+    conn.commit()
+    return jsonify(ok=True)
 
 
 # ---------------------------------------------------------------- háttérfeladatok

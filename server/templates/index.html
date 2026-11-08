@@ -39,6 +39,7 @@
       <div class="row center">
         <button type="submit" id="gen-btn">Generálás</button>
         <span class="hint">Ma még <b id="remaining">{{ remaining }}</b> / {{ daily_limit }} kép generálható.</span>
+        <span class="hint provider{% if 'OFFLINE' in provider_label %} error{% endif %}">Képgenerálás: {{ provider_label }}</span>
       </div>
       <p id="gen-msg" class="msg" role="status"></p>
     </form>

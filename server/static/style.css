@@ -155,3 +155,4 @@ button.link.danger { color: var(--error); }
 #job-box { margin-top: 16px; }
 #job-box progress { width: 100%; height: 12px; accent-color: var(--accent); }
 code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .9em; }
+.provider { margin-left: auto; }

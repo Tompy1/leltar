@@ -30,3 +30,10 @@ docker compose exec app flask --app app add-user te@pelda.hu
 ```
 
 Lépésről lépésre: **VPS_telepitesi_utmutato.pdf**.
+
+## Saját modell az otthoni gépen (videókártyával)
+
+A `home_worker/` mappa programja az otthoni gépeden futtatja a képgeneráló modellt
+(SDXL / SDXL-Turbo / SD-Turbo), és maga kapcsolódik a VPS-hez – nem kell portot nyitni.
+Szerveren: `WORKER_TOKEN=...` a `.env`-be. Otthon: `start_windows.bat` (vagy `start_linux.sh`).
+Lépésről lépésre: **Otthoni_gep_utmutato.pdf**.

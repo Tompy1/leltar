@@ -1,0 +1,11 @@
+# Otthoni képgeneráló worker – beállítások
+# Ezt a fájlt a start_windows.bat / start_linux.sh első indításkor beallitasok.txt néven lemásolja.
+
+# A weboldalad címe (ugyanaz, amit a böngészőbe írsz), pl. http://203.161.47.254  vagy  https://kepek.sajatdomain.hu
+SZERVER=http://IDE_A_SZERVER_CIME
+
+# A szerver .env fájljában lévő WORKER_TOKEN értéke (pontosan ugyanaz!)
+TOKEN=IDE_A_TOKEN
+
+# Modell: auto (a videókártyához igazítja) | sdxl (legszebb, 12+ GB) | sdxl-turbo (gyors, 6-8 GB) | sd-turbo (4 GB)
+MODELL=auto
